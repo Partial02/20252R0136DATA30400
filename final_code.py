@@ -1,4 +1,7 @@
-
+########################
+#   Code by Yejun Oh   #
+#      2021320312      #
+########################
 
 # Step 0. Imports & Paths
 import os
@@ -97,17 +100,14 @@ def load_keywords(path: Path, name2id):
             id2keywords[cid] = kw_list
     return id2keywords
 
-# --- 실행 부분 ---
 id2name, name2id = load_classes(CLASSES_PATH)
 num_classes = len(id2name)
 
-# [추가 포인트] LabelGCN을 위해 0번부터 num_classes-1번까지 이름을 정렬하여 저장
+# Sort from 0 to num_classes-1 for LabelGCN
 class_names = [id2name[i] for i in range(num_classes)]
 
 id2keywords = load_keywords(KEYWORDS_PATH, name2id)
 parents, children, depth, roots = load_hierarchy(HIER_PATH, num_classes)
-
-# LabelGCN 학습을 위해 label_map 변수도 기존 id2name과 호환되게 유지
 label_map = name2id 
 
 print("num_classes:", num_classes)
@@ -157,20 +157,21 @@ print(class_texts[0])
 
 # Step 1.4: Light & Fast Embedding Generation
 
-# 통합 저장 파일 경로 (이 파일이 있으면 아래 과정을 스킵합니다)
+# We can skip the 30 minutes time-consuming procedure with this .pt file
+# Please download it from the link in README.md!
 save_path = OUT_DIR / "full_processed_data.pt"
 
 if not os.path.exists(save_path):
     print("🚀 .pt 파일이 없으므로 인코딩 모델을 로드하고 생성을 시작합니다...")
     
-    # 1. # 모델 mixedbread-ai로 교체
+    # 1. # 모델은 mixedbread-ai로 설정
     model_name = 'mixedbread-ai/mxbai-embed-large-v1'
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     embed_model = AutoModel.from_pretrained(model_name).to(device)
     embed_model.eval()
 
     # 2. 인코딩 함수 정의
-    def encode_texts(texts, batch_size=128, max_length=512, desc="Encoding"): # large 모델이므로 배치 사이즈 소폭 조정 가능
+    def encode_texts(texts, batch_size=128, max_length=512, desc="Encoding"):
         all_embeddings = []
         pbar = tqdm_std(range(0, len(texts), batch_size), desc=desc, ascii=True)
         with torch.no_grad():
@@ -226,14 +227,14 @@ if not os.path.exists(save_path):
     row_max[row_max == 0] = 1e-9
     silver_labels = silver_labels / row_max
 
-    # 4. 상위 K개 유지 (0.37을 만든 정제 로직)
+    # 4. 상위 K개 유지
     top_k = 20
     values, indices = torch.topk(silver_labels, k=top_k, dim=1)
     train_y = torch.zeros_like(silver_labels).scatter_(1, indices, values).cpu()
 
     print(f"✅ Silver Labels 보정 완료: 평균 {train_y[train_y > 0].shape[0]/len(train_y):.1f}개 레이블")
 
-    # 5. [결정적 수정] 2단계에 필요한 모든 데이터를 하나로 묶어서 저장
+    # 5. .pt 파일로 저장
     torch.save({
         'train_embs': train_embs.cpu(),    # GCN 입력값 (X)
         'test_embs': test_embs.cpu(),      # 평가용 (X_test)
@@ -264,10 +265,8 @@ import numpy as np
 load_path = OUT_DIR / "full_processed_data.pt" 
 
 if os.path.exists(load_path):
-    # [핵심 수정] weights_only=False를 추가하여 defaultdict 등 파이썬 객체 로드를 허용합니다.
     checkpoint = torch.load(load_path, map_location=device, weights_only=False)
     
-    # 1.6에서 저장한 키값 그대로 변수 할당
     train_embs = checkpoint['train_embs'].to(device)
     test_embs = checkpoint['test_embs'].to(device)
     class_embs = checkpoint['class_embs'].to(device)
@@ -352,7 +351,7 @@ class MultiHeadGCNLayer(nn.Module):
             out = torch.matmul(weighted_adj, x.t()).t()
             head_outputs.append(out)
         
-        # Head들의 결과를 합침 (평균 또는 Concatenation 후 축소)
+        # Head들의 결과를 평균
         return torch.stack(head_outputs).mean(0)
 
 class LabelGCN(nn.Module):
@@ -366,7 +365,7 @@ class LabelGCN(nn.Module):
         self.mh_gcn2 = MultiHeadGCNLayer(num_classes, num_heads=3)
 
     def forward(self, x, adj):
-        # 1. 초기 투사 (0.287 모델의 강점 유지)
+        # 1. 초기 투사
         x_init = self.projection(x)
         x_init = self.dropout(x_init)
         
@@ -377,8 +376,7 @@ class LabelGCN(nn.Module):
         # 3. Multi-head GCN 2단
         out_2 = self.mh_gcn2(out_1, adj)
         
-        # 4. 0.287 모델의 핵심인 Skip Connection 유지
-        # 원본의 힘을 잃지 않으면서 Multi-head의 통찰을 섞음
+        # 4. Skip Connection: 원본의 힘을 잃지 않으면서 Multi-head의 통찰을 섞음
         final_out = x_init + 0.5 * out_2
         
         return final_out
@@ -395,7 +393,6 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=5e-4) # 
 
 # 학습률을 서서히 낮춰주는 스케줄러 추가
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=15)
-
 criterion = nn.BCEWithLogitsLoss()
 
 model.train()
@@ -422,7 +419,6 @@ torch.save(model.state_dict(), "upgraded_label_gcn.pt")
 
 model.eval()
 with torch.no_grad():
-    # 모델 추론 시 adj_matrix 사용
     test_logits = model(test_embs.to(device), A_hat)
     test_probs = torch.sigmoid(test_logits).cpu().numpy()
 
@@ -442,29 +438,20 @@ for row in test_probs:
     formatted_row = ",".join(map(str, sorted(indices))) 
     submission_labels.append(formatted_row)
 
-# 4. [핵심] 샘플과 동일한 컬럼명 'id' 사용 (pid 아님)
+# 4. make df
 submission_df = pd.DataFrame({
     "id": test_pids, 
     "label": submission_labels
 })
 
-# 5. [저장] index=False는 필수이며, 큰따옴표는 pandas가 자동으로 처리합니다.
+# 5. submit
 output_filename = "2021320312_final.csv"
 submission_df.to_csv(output_filename, index=False)
 
 print(f"✅ 샘플과 동일한 형식으로 저장 완료: {output_filename}")
 print("-" * 30)
-# 저장된 파일의 첫 5줄을 읽어서 형식을 최종 확인합니다.
+# 저장된 파일의 첫 5줄을 읽어서 형식을 최종 확인
 with open(output_filename, 'r') as f:
     for _ in range(5):
         print(f.readline().strip())
-
-
-
-
-
-
-
-
-
 
